@@ -1,5 +1,8 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving, FlexibleInstances #-}
 import Control.Monad
+import Control.Monad.IO.Class
+import Control.Monad.Reader
+import Control.Monad.State.Strict
 import Data.Bool
 import System.IO
 
@@ -27,6 +30,11 @@ data Level = Level
   }
   deriving (Show)
 
+data Helpers = Helpers
+  { _leaderAge :: Int
+  , _blockers  :: [Coordinate]
+  }
+
 getLevel :: IO Level
 getLevel = do
   [fls, pos, rnd, exf, exp, cln, _, elv] <- fmap words getLine
@@ -36,37 +44,52 @@ getLevel = do
       return (read elf, read elp)
   return $ Level (read fls) (read pos) (read rnd) (read exf,read exp) (read cln) elvs
 
-getLeader :: IO (Maybe Leader)
+getLeader :: MonadIO m => m (Maybe Leader)
 getLeader = do
-  [ldf,ldp,ldd] <- fmap words getLine
+  [ldf,ldp,ldd] <- liftM words (liftIO getLine)
   return $ if ldd == "NONE" then Nothing else Just ((read ldf,read ldp),read ldd)
 
-facing :: Leader -> Coordinate -> Bool
-facing ((mef,mep),dir) (tgf,tgp) =
-  mef == tgf && ((mep <= tgp && dir == RIGHT) || (mep >= tgp && dir == LEFT))
+type Android = StateT Helpers (ReaderT Level IO)
 
-block :: Level -> [Coordinate] -> Leader -> Bool
-block level blocks leader = not . any (facing leader) $ _exit level:_elevators level ++ blocks
+incLeaderAge :: Int -> Android ()
+incLeaderAge units = modify $ \helpers -> helpers { _leaderAge = _leaderAge helpers + units }
+
+pushBlocker :: Coordinate -> Android ()
+pushBlocker blocker = modify $ \helpers -> helpers { _blockers = blocker : _blockers helpers }
 
 main :: IO ()
 main = do
   hSetBuffering stdout LineBuffering
   level <- getLevel
   debug level
-  loop level [] 0
+  let helpers = Helpers 0 []
+  void $ runReaderT (execStateT (forever step) helpers) level
 
-loop :: Level -> [Coordinate] -> Int -> IO ()
-loop level blocks age = do
+step :: Android ()
+step = do
   mleader <- getLeader
   debug mleader
-  case mleader of
-    Just leader
-      | age > 0 && block level blocks leader -> do
-          print BLOCK
-          loop level (fst leader:blocks) (age - 3)
-    _ -> do
-          print WAIT
-          loop level blocks (age+1)
+  act <- maybe (return WAIT) action mleader
+  liftIO $ print act
+  case act of
+    BLOCK -> do
+      pushBlocker (maybe undefined fst mleader)
+      incLeaderAge (-3)
+    WAIT -> do
+      incLeaderAge 1
 
-debug :: Show a => a -> IO ()
-debug = hPrint stderr
+facing :: Leader -> Coordinate -> Bool
+facing ((mef,mep),dir) (tgf,tgp) =
+  mef == tgf && ((mep <= tgp && dir == RIGHT) || (mep >= tgp && dir == LEFT))
+
+action :: Leader -> Android Action
+action leader = do
+  exit <- asks _exit
+  elevators <- asks _elevators
+  blockers <- gets _blockers
+  leaderAge <- gets _leaderAge
+  let doWait = leaderAge <= 0 || any (leader `facing`) (exit:elevators ++ blockers)
+  return $ bool BLOCK WAIT doWait
+
+debug :: (MonadIO m, Show a) => a -> m ()
+debug = liftIO . hPrint stderr
