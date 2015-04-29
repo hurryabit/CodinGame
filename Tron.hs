@@ -6,13 +6,14 @@ import Control.Category
 import Control.Monad
 import Control.Monad.Trans.State.Lazy
 import Data.Array
-import Data.List
+import Data.Bool
+import Data.List (unfoldr, (\\))
 import Data.Maybe
 import Data.Traversable
 import System.Random
 import System.IO
 
-import Prelude hiding (id, (.))
+import Prelude hiding (id, (.), iterate)
 
 data Automaton i o = forall s. Automaton s (i -> s -> (o,s))
 
@@ -59,13 +60,16 @@ runAutomaton (Automaton init step) inputs = evalState (traverse (state . step) i
 
 mkAutomaton :: s -> (i -> s -> (o,s)) -> Automaton i o
 mkAutomaton = Automaton
+  -- proc input -> do
+  --   rec let (output,state) = step input stateD
+  --       stateD <- delay init -< state
+  --   returnA -< output
 
 copy :: Automaton o o
 copy = id
 
 delay :: o -> Automaton o o
-delay init =
-    mkAutomaton init (\i s -> (s,i))
+delay init = Automaton init (\i s -> (s,i))
 
 output :: [o] -> Automaton i o
 output os =
@@ -81,6 +85,11 @@ accumulate acc0 fun =
 accumulateD :: o -> (i -> o -> o) -> Automaton i o
 accumulateD acc0 fun = accumulate acc0 fun >>> delay acc0
 
+iterate :: o -> (o -> o) -> Automaton i o
+iterate x0 fun = accumulateD x0 (const fun)
+
+--mapA :: Automaton i [x] -> Automaton x y -> Automaton i [y]
+
 clock :: Automaton i Int
 clock = accumulateD 0 (const succ)
 
@@ -88,85 +97,106 @@ type Location = (Int,Int)
 
 type Player = Int
 
-data RawInput = RawInput
-  { rawMe   :: Player
-  , rawLocs :: Array Player Location
+data Event = Event
+  { _me   :: Player
+  , _locs :: Array Player (Location,Location)
   }
   deriving (Show)
 
 data Direction = UP | DOWN | LEFT | RIGHT
   deriving (Show, Eq, Ord, Enum, Bounded)
 
-type TronAI = Player -> Automaton RawInput Direction
+type TronAI = Automaton Event Direction
 
 execTronAI :: TronAI -> IO ()
 execTronAI ai = do
   hSetBuffering stdin LineBuffering
   hSetBuffering stdout LineBuffering
-  inputs <- rawInputs <$> getContents
-  mapM_ print $ runAutomaton (ai $ rawMe $ head inputs) inputs
+  events <- parseEvents <$> getContents
+  mapM_ print $ runAutomaton ai events
 
 main :: IO ()
 main = execTronAI firstAI
 
-rawInputs :: String -> [RawInput]
-rawInputs = unfoldr (Just . splitRawInput) . lines
+parseEvents :: String -> [Event]
+parseEvents = unfoldr (Just . splitEvent) . lines
   where
-    splitRawInput :: [String] -> (RawInput,[String])
-    splitRawInput (ln:rest) =
+    splitEvent :: [String] -> (Event,[String])
+    splitEvent (ln:rest) =
       let ints        = map read . words
           [n,me]      = ints ln
           (lns,rest') = splitAt n rest
-          locs        = listArray (0,n-1) $ map ((\[_,_,x,y] -> (x,y)) . ints) lns
-      in  (RawInput { rawMe = me, rawLocs = locs },rest')
+          locs        = listArray (0,n-1) $ map ((\[x0,y0,x1,y1] -> ((x0,y0),(x1,y1))) . ints) lns
+      in  (Event { _me = me, _locs = locs },rest')
 
 -- Real AI starts here.
 
-data Input = Input
-  { moves  :: [(Player,Location)]
-  , deaths :: [Player]
-  }
-  deriving (Show)
+type PlayerSet = [Int]
 
-cookInput :: Automaton RawInput Input
-cookInput = diff <$> (Just ^>> delay Nothing) <*> copy
+type LocationTable = [(Player,Location)]
+
+me :: Automaton Event Player
+me = arr _me
+
+myLocation :: Automaton Event Location
+myLocation = snd <$> ((!) <$> arr _locs <*> me)
+
+locations, tails :: Automaton Event LocationTable
+locations = arr $ \event -> [ (pl,(x,y))| (pl,(_,(x,y))) <- assocs (_locs event), x >= 0 && y >= 0 ]
+tails     = arr $ \event -> [ (pl,(x,y))| (pl,((x,y),_)) <- assocs (_locs event), x >= 0 && y >= 0 ]
+
+living :: Automaton LocationTable PlayerSet
+living = arr $ map fst
+
+died :: Automaton PlayerSet PlayerSet
+died = (\\) <$> delay [] <*> copy
+
+type World = Array Location (Maybe Player)
+
+world :: Automaton LocationTable World
+world = copy &&& (living >>> died) >>> accumulate empty update
   where
-    diff :: Maybe RawInput -> RawInput -> Input
-    diff mold new =
-      let newLocs           = assocs (rawLocs new)
-          alive (x,y)       = x >= 0 && y >= 0
-          died old (pl,loc) = not (alive loc) && alive (rawLocs old ! pl)
-      in  Input
-            { moves  = filter (alive . snd) newLocs
-            , deaths = maybe [] (\old -> map fst $ filter (died old) newLocs) mold
-            }
+    empty = listArray ((0,0),(29,19)) $ repeat Nothing
+    update (locs,dths) wld =
+      let updLocs = [ (loc,Just pl) | (pl,loc) <- locs ]
+          updDths = [ (loc,Nothing) | (loc,Just pl) <- assocs wld, pl `elem` dths ]
+      in  wld // (updLocs ++ updDths)
 
-type Board = Array Location Player
-
-emptyBoard :: Board
-emptyBoard = listArray ((0,0),(29,19)) $ repeat (-1)
-
-updateBoard :: Input -> Board -> Board
-updateBoard input board =
-  let updateMoves  = [ (loc,pl) | (pl,loc) <- moves input ]
-      updateDeaths = [ (loc,-1) | (loc,pl) <- assocs board, pl `elem` deaths input ]
-  in  board // (updateMoves ++ updateDeaths)
-
-isFree :: Board -> Location -> Bool
-isFree board loc = inRange (bounds board) loc && board ! loc < 0
+isFree :: Arrow a => a (Location,World) Bool
+isFree = arr $ \(loc,brd) -> inRange (bounds brd) loc && isNothing (brd ! loc)
 
 move :: Location -> Direction -> Location
-move (x,y) dir = case dir of
+move(x,y) dir = case dir of
   UP    -> (x  ,y-1)
   DOWN  -> (x  ,y+1)
   LEFT  -> (x-1,y  )
   RIGHT -> (x+1,y  )
 
+moveA :: Automaton (Location,Direction) Location
+moveA = arr $ uncurry move
+
+blocked :: Automaton ((Location,Direction),World) Bool
+blocked = first moveA >>> isFree
+
+checkMove :: Automaton (Direction,(Location,World)) (Maybe Direction)
+checkMove =
+  proc (dir,(loc,wld)) -> do
+    isf <- isFree -< (loc `move` dir,wld)
+    returnA -< if isf then Just dir else Nothing
+
+bestMove :: Automaton (Location,World) Direction
+bestMove =
+  proc loc_wld -> do
+    rec moveD <- delay DOWN -< move
+        dirs <- for [0 .. 3] (\n -> checkMove <<< first (rotate n)) -< (moveD,loc_wld)
+        let move = head (catMaybes dirs)
+    returnA -< move
+
 firstAI :: TronAI
-firstAI me =
-  proc rawInput -> do
-    input <- cookInput -< rawInput
-    board <- accumulateD emptyBoard updateBoard -< input
-    let Just pos = lookup me (moves input)
-        Just dir = find (isFree board . move pos) [minBound .. maxBound]
-    returnA -< dir
+firstAI = myLocation &&& (((++) <$> locations <*> tails) >>> world) >>> bestMove
+
+rotate :: (Enum o, Bounded o) => Int -> Automaton o o
+rotate n = arr $ \o -> toEnum $ (fromEnum o + n) `mod` (fromEnum (maxBound `as` o) + 1)
+  where
+    as :: a -> a -> a
+    as = const
