@@ -17,7 +17,7 @@ data Direction = LEFT | RIGHT
 
 type Leader = (Coordinate,Direction)
 
-data Action = WAIT | BLOCK
+data Action = WAIT | BLOCK | ELEVATOR
   deriving (Show, Eq, Ord, Enum, Bounded)
 
 data Level = Level
@@ -26,6 +26,7 @@ data Level = Level
   , _rounds     :: Int
   , _exit       :: Coordinate
   , _clones     :: Int
+  , _maxLadders :: Int
   , _elevators  :: [Coordinate]
   }
   deriving (Show)
@@ -33,16 +34,17 @@ data Level = Level
 data Helpers = Helpers
   { _leaderAge :: Int
   , _blockers  :: [Coordinate]
+  , _ladders   :: [Coordinate]
   }
 
 getLevel :: IO Level
 getLevel = do
-  [fls, pos, rnd, exf, exp, cln, _, elv] <- fmap words getLine
+  [fls, pos, rnd, exf, exp, cln, mld, elv] <- fmap words getLine
   elvs <-
     replicateM (read elv) $ do
       [elf, elp] <- fmap words getLine
       return (read elf, read elp)
-  return $ Level (read fls) (read pos) (read rnd) (read exf,read exp) (read cln) elvs
+  return $ Level (read fls) (read pos) (read rnd) (read exf,read exp) (read cln) (read mld) elvs
 
 getLeader :: MonadIO m => m (Maybe Leader)
 getLeader = do
@@ -57,39 +59,51 @@ incLeaderAge units = modify $ \helpers -> helpers { _leaderAge = _leaderAge hel
 pushBlocker :: Coordinate -> Android ()
 pushBlocker blocker = modify $ \helpers -> helpers { _blockers = blocker : _blockers helpers }
 
+pushLadder :: Coordinate -> Android ()
+pushLadder ladder = modify $ \helpers -> helpers { _ladders = ladder : _ladders helpers }
+
 main :: IO ()
 main = do
   hSetBuffering stdout LineBuffering
   level <- getLevel
   debug level
-  let helpers = Helpers 0 []
+  let helpers = Helpers 0 [] []
   void $ runReaderT (execStateT (forever step) helpers) level
 
 step :: Android ()
 step = do
+  incLeaderAge 1
   mleader <- getLeader
   debug mleader
-  act <- maybe (return WAIT) action mleader
-  liftIO $ print act
-  case act of
-    BLOCK -> do
-      pushBlocker (maybe undefined fst mleader)
-      incLeaderAge (-3)
-    WAIT -> do
-      incLeaderAge 1
+  case mleader of
+    Nothing -> liftIO $ print WAIT
+    Just leader -> do
+      act <- action leader
+      liftIO $ print act
+      unless (act == WAIT) $ incLeaderAge (-3)
+      when (act == BLOCK) $ pushBlocker (fst leader)
+      when (act == ELEVATOR) $ pushLadder (fst leader)
+
 
 facing :: Leader -> Coordinate -> Bool
 facing ((mef,mep),dir) (tgf,tgp) =
   mef == tgf && ((mep <= tgp && dir == RIGHT) || (mep >= tgp && dir == LEFT))
 
+levelled :: Leader -> Coordinate -> Bool
+levelled ((mef,_),_) (tgf,_) = mef == tgf
+
 action :: Leader -> Android Action
 action leader = do
-  exit <- asks _exit
-  elevators <- asks _elevators
-  blockers <- gets _blockers
+  objects <- liftM concat $ sequence [liftM (:[]) (asks _exit), asks _elevators, gets _blockers, gets _ladders]
   leaderAge <- gets _leaderAge
-  let doWait = leaderAge <= 0 || any (leader `facing`) (exit:elevators ++ blockers)
-  return $ bool BLOCK WAIT doWait
+  let result
+        | leaderAge <= 0 || any (leader `facing`) objects =
+            WAIT
+        | any (leader `levelled`) objects =
+            BLOCK
+        | otherwise =
+            ELEVATOR
+  return result
 
 debug :: (MonadIO m, Show a) => a -> m ()
 debug = liftIO . hPrint stderr
