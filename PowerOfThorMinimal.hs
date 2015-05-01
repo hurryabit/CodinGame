@@ -1,4 +1,4 @@
-main=getLine>>=(\[a,b,s,t]->let[a,b]?x|x>0=a|1>0=b;x=s-a;y=t-b;u=abs x;v=abs y;d=["NS"?y,"WE"?x]in mapM putStrLn$replicate(min u v)d++repeat[d?(v-u)]).map read.words
+main=interact$(\(a:b:s:t:_)->let[a,b]?x|x>0=a|1>0=b;x=s-a;y=t-b;u=abs x;v=abs y;d=["NS"?y,"WE"?x]in unlines$replicate(min u v)d++repeat[d?(v-u)]).map read.words
 
 
  -- main=getLine>>=(\[a,b,s,t]->
