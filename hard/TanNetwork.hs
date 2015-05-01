@@ -7,77 +7,49 @@ import Data.Char
 import Data.Function
 import Data.Graph
 import Data.List
+import Data.List.Split
 import qualified Data.Map.Strict as Map
 import Data.Maybe
 import Data.STRef
-import Text.ParserCombinators.ReadP
 
-data Point =
-  Point
-    { latitude  :: Double
-    , longitude :: Double
-    }
-    deriving (Show)
-
-type Ident = String
-
-data Stop =
-  Stop
-    { ident    :: Ident
-    , name     :: String
-    , position :: Point
-    }
-    deriving (Show)
-
-point :: ReadP Point
-point =
-  Point <$> radians <*> radians
-  where
-    radians = ((/ 180.0) . (* pi)) <$> readS_to_P reads <* comma
-
-comma :: ReadP ()
-comma = void $ char ','
-
-quote :: ReadP ()
-quote = void $ char '\"'
-
-field :: ReadP String
-field = get `manyTill` comma
-
-eol :: ReadP ()
-eol = void $ munch1 (`elem` "\r\n")
-
-stop :: ReadP Stop
-stop =
-  Stop
-    <$> field
-    <*> ((quote *> get `manyTill` quote) <++ munch (',' /=)) <* comma <* field
-    <*> point <* replicateM 3 field <* munch (`notElem` "\r\n")
-
-list :: ReadP a -> ReadP [a]
-list item = do
-  n <- read <$> munch1 isDigit <* eol
-  replicateM n (item <* eol)
-
-edge :: ReadP (Ident,Ident)
-edge =
-  (,) <$> get `manyTill` munch1 isSpace <*> munch1 (not . isSpace)
-
-request :: ReadP (Ident,Ident,[Stop],[(Ident,Ident)])
-request =
-    (,,,) <$> get `manyTill` eol <*> get `manyTill` eol <*> list stop <*> list edge
+type Point = (Double,Double)
 
 dist :: Point -> Point -> Double
-dist (Point lat1 lon1) (Point lat2 lon2) =
+dist (lat1,lon1) (lat2,lon2) =
   let x = (lon2 - lon1) * cos ((lat1 + lat2) / 2)
       y = lat2 - lat1
   in  6371.0 * sqrt (x*x + y*y)
 
+type Ident = String
+
+data Stop = Stop
+  { ident    :: Ident
+  , name     :: String
+  , position :: Point
+  }
+  deriving (Show)
+
+parseStop :: String -> Stop
+parseStop line =
+  let ident:name:_:lat:lon:_ = splitWhen (','==) line
+      radians = ((/ 180.0) . (* pi)) . read
+  in  Stop
+        { ident    = ident
+        , name     = init (tail name)
+        , position = (radians lat,radians lon)
+        }
+
+parseEdge :: String -> (Ident,Ident)
+parseEdge line =
+  let src:tgt:_ = words line
+  in  (src,tgt)
+
 main :: IO ()
 main = do
-  input <- getContents
-  let ((src,tgt,stops,edges),""):_ = readP_to_S request (input ++ "\n")
-  case solve src tgt stops edges of
+  src:tgt:n:rest1 <- liftM lines getContents
+  let (stops,m:rest2) = splitAt (read n) rest1
+      edges = take (read m) rest2
+  case solve src tgt (map parseStop stops) (map parseEdge edges) of
     Nothing  -> putStrLn "IMPOSSIBLE"
     Just pth -> mapM_ (putStrLn . name) pth
 
