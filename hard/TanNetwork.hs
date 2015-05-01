@@ -1,16 +1,11 @@
 import Control.Applicative
 import Control.Monad
-import Control.Monad.ST
 import Data.Array
-import Data.Array.ST
-import Data.Char
-import Data.Function
-import Data.Graph
 import Data.List
 import Data.List.Split
+import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Map.Strict as Map
 import Data.Maybe
-import Data.STRef
 
 type Point = (Double,Double)
 
@@ -50,88 +45,48 @@ main = do
   let (stops,m:rest2) = splitAt (read n) rest1
       edges = take (read m) rest2
   case solve src tgt (map parseStop stops) (map parseEdge edges) of
-    Nothing  -> putStrLn "IMPOSSIBLE"
-    Just pth -> mapM_ (putStrLn . name) pth
+    []  -> putStrLn "IMPOSSIBLE"
+    pth -> mapM_ (putStrLn . name) pth
 
 infinity :: Double
 infinity = 1/0
 
-solve :: Ident -> Ident -> [Stop] -> [(Ident,Ident)] -> Maybe [Stop]
-solve src tgt stops edges
-  | src == tgt = Just [fromJust $ find ((src ==) . ident) stops]
+solve :: Ident -> Ident -> [Stop] -> [(Ident,Ident)] -> [Stop]
 solve src tgt stops edges =
-  let n2sArray  = listArray (1,length stops) stops
-      -- number to stop
-      n2s n     = n2sArray ! n
+  let v2sArray  = listArray (1,length stops) stops
+      v2s v     = v2sArray ! v
+      i2vMap    = Map.fromList [ (ident s,v) | (v,s) <- assocs v2sArray ]
+      i2v i     = fromJust $ i `Map.lookup` i2vMap
+      graph     = accumArray (flip (:)) [] (bounds v2sArray) $
+                    [ (i2v i1,i2v i2) | (i1,i2) <- edges ]
+      v2p       = position . v2s
+  in  map v2s $ astar graph (\v1 v2 -> dist (v2p v1) (v2p v2)) (i2v src) (i2v tgt)
 
-      i2nMap    = Map.fromList [ (ident s,n) | (n,s) <- assocs n2sArray ]
-      -- ident to number
-      i2n i     = i `Map.lookup` i2nMap
+type Vertex = Int
 
-      graph =
-        accumArray (flip (:)) [] (bounds n2sArray) $ do
-          (i1,i2) <- edges
-          let on1 = i2n i1
-              on2 = i2n i2
-          guard $ isJust on1 && isJust on2
-          return (fromJust on1,fromJust on2)
-      n2p = position . n2s
-      metric n1 n2 = dist (n2p n1) (n2p n2)
-  in  map n2s <$> astar graph metric (fromJust $ i2n src) (fromJust $ i2n tgt)
+type Endo a = a -> a
 
-type PQueue s v p = STRef s [(v,p)]
-
-newPQ :: ST s (PQueue s v p)
-newPQ = newSTRef []
-
-insertPQ :: Ord p => PQueue s v p -> v -> p -> ST s ()
-insertPQ queue val pty =
-  modifySTRef' queue $ insertBy (compare `on` snd) (val,pty)
-
-deletePQ :: Eq v => PQueue s v p -> v -> ST s ()
-deletePQ queue val =
-  modifySTRef' queue $ deleteBy ((==) `on` fst) (val,undefined)
-
-extractPQ :: PQueue s v p -> ST s (Maybe v)
-extractPQ queue = do
-  ls <- readSTRef queue
-  case ls of
-    []    -> return Nothing
-    hd:tl -> writeSTRef queue tl >> return (Just $ fst hd)
-
-astar :: Graph -> (Vertex -> Vertex -> Double) -> Vertex -> Vertex -> Maybe [Vertex]
-astar graph metric src tgt = runST $ do
-  table <- newArray (bounds graph) (infinity,Nothing)
-  queue <- newPQ
-  insertTPQ table queue src 0 Nothing
-  loop table queue
+astar :: Array Vertex [Vertex] -> (Vertex -> Vertex -> Double) -> Vertex -> Vertex -> [Vertex]
+astar graph dist src tgt = retrace tgt []
   where
-    insertTPQ :: STArray s Vertex (Double,Maybe Vertex) -> PQueue s Vertex Double -> Vertex -> Double -> Maybe Vertex -> ST s ()
-    insertTPQ table queue nod dst pre = do
-      writeArray table nod (dst,pre)
-      insertPQ queue nod (dst + metric nod tgt)
-    path :: STArray s Vertex (Double,Maybe Vertex) -> [Vertex] -> ST s [Vertex]
-    path table pth@(cur:_) = do
-      (_,opre) <- readArray table cur
-      case opre of
-        Nothing  -> return pth
-        Just pre -> path table (pre:pth)
-    loop :: STArray s Vertex (Double,Maybe Vertex) -> PQueue s Vertex Double -> ST s (Maybe [Vertex])
-    loop table queue = do
-      omin <- extractPQ queue
-      case omin of
-        Nothing        -> return Nothing
-        Just cur
-          | cur == tgt -> liftM Just $ path table [tgt]
-          | otherwise  -> do
-              expand table queue cur
-              loop table queue
-    expand :: STArray s Vertex (Double,Maybe Vertex) -> PQueue s Vertex Double -> Vertex -> ST s ()
-    expand table queue cur =
-      forM_ (graph ! cur) $ \nxt -> do
-        (curDst,_) <- readArray table cur
-        let newNxtDst = curDst + metric cur nxt
-        (oldNxtDst,_) <- readArray table nxt
-        when (newNxtDst < oldNxtDst) $ do
-          deletePQ queue nxt
-          insertTPQ table queue nxt newNxtDst (Just cur)
+    process :: Endo (Map.Map Double (Vertex,Vertex),IntMap.IntMap Vertex)
+    process (open,closed)
+      | cur == tgt                 = (Map.empty                      , closed')
+      | cur `IntMap.member` closed = (open'                          , closed )
+      | otherwise                  = (foldr queue open' (graph ! cur), closed')
+      where
+        Just ((est,(cur,pre)),open') = Map.minViewWithKey open
+        closed' = IntMap.insert cur pre closed
+        queue :: Vertex -> Endo (Map.Map Double (Vertex,Vertex))
+        queue suc = Map.insert est' (suc,cur)
+          where
+            est' = est - dist cur tgt + dist cur suc + dist suc tgt
+    open0    = Map.singleton (dist src tgt) (src,src)
+    closed0  = IntMap.empty
+    traces   = snd $ until (Map.null . fst) process (open0,closed0)
+    retrace cur pth =
+      case IntMap.lookup cur traces of
+        Nothing        -> pth
+        Just nxt
+          | nxt == cur -> cur:pth
+          | otherwise  -> retrace nxt (cur:pth)
