@@ -1,13 +1,18 @@
 {-# LANGUAGE ExistentialQuantification #-}
 {-# OPTIONS_GHC -XArrows #-}
+module Automaton where
+
 import Control.Applicative
 import Control.Arrow
 import Control.Category
+import Control.Monad
 import Control.Monad.Trans.State.Lazy
 import Data.Binary
 import Data.Bool
 import Data.Maybe
 import Data.Traversable
+import Debug.Trace
+import System.IO
 
 import Prelude hiding (id, (.), iterate)
 
@@ -51,6 +56,19 @@ instance Applicative (Automaton i) where
 runAutomaton :: Automaton i o -> [i] -> [o]
 runAutomaton (Automaton init step) inputs = evalState (traverse (state . step) inputs) init
 
+type Parser s i = String -> (s,[i])
+type Printer o = o -> String
+
+execAutomaton :: Show d => Parser s i -> Printer o -> Automaton (s,i) (o,d) -> IO ()
+execAutomaton parser printer aut = do
+  hSetBuffering stdin  LineBuffering
+  hSetBuffering stdout LineBuffering
+  (s,is) <- parser <$> getContents
+  forM_ (runAutomaton aut $ map ((,) s) is) $ \(o,d) ->
+    do  putStrLn (printer o)
+        traceIO (show d)
+
+
 mkAutomaton :: Binary s => s -> (i -> s -> (o,s)) -> Automaton i o
 mkAutomaton = Automaton
   -- proc input -> do
@@ -65,9 +83,10 @@ delay :: Binary o => o -> Automaton o o
 delay init =
   Automaton init (\i s -> (s,i))
 
--- output :: [o] -> Automaton i o
--- output os =
---   mkAutomaton os (\_ (o:os') -> (o,os'))
+delayFrom :: Binary o => Automaton (o,o) o
+delayFrom =
+  Automaton Nothing $ \(i1,i2) s ->
+    (fromMaybe i1 s,Just i2)
 
 accum0 :: Binary o => o -> (i -> o -> o) -> Automaton i o
 accum0 acc0 fun = proc i ->
@@ -127,7 +146,7 @@ mergeL (Automaton init1 step1) (Automaton init2 step2) =
 
 cnt :: Automaton Int Int
 cnt = proc input ->
-  do  rec now <- fromJust ^<< mergeL (onFor 1 <<^ fst) (Just ^<< delay 0 <<^ snd) -< (input,now+1)
+  do  rec now <- delayFrom -< (input,now+1)
       returnA -< now
 
 switch0 :: Automaton i o -> Automaton i o -> Automaton (i,Notify b) o
@@ -159,3 +178,9 @@ every n o =
     if k == 0
       then (Blip o,n-1)
       else (Mute  ,k-1)
+
+--------------------------------------------------------------------------------
+--                                                                            --
+--     P R O B L E M   S P E C I F I C   C O D E   S T A R T S   H E R E      --
+--                                                                            --
+--------------------------------------------------------------------------------
